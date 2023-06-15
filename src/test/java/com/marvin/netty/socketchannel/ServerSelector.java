@@ -16,20 +16,39 @@ import static com.marvin.netty.bytebuffer.ByteBufferUtil.debugAll;
 import static com.marvin.netty.bytebuffer.ByteBufferUtil.debugRead;
 
 /**
- * @TODO:
- * SelectionKey有4种事件：
+ * @TODO: SelectionKey有4种事件：
  * 1. accept 有连接请求的时候触发
  * 2. connect 是客户端，连接建立以后触发的事件
  * 3. read 客户端发了数据，表示可读事件
  * 4. write 表示可写事件
- *
- *
+ * <p>
+ * <p>
  * SelectionKey每次被处理完成后要删除这个key，否则会报空指针异常。
  * @author: dengbin
  * @create: 2023-06-15 16:48
  **/
 @Slf4j
 public class ServerSelector {
+    public static void split(ByteBuffer source) {
+        // 变成一个读模式
+        source.flip();
+        for (int i = 0; i < source.limit(); i++) {
+            // 找到完整信息
+            if (source.get(i) == '\n') {
+                int length = i + 1 - source.position();
+                ByteBuffer target = ByteBuffer.allocate(length);
+                // 从source去读，向targe去写
+                for (int j = 0; j < length; j++) {
+                    target.put(source.get());
+                }
+                debugAll(target);
+            }
+        }
+        // 变成一个写模式。
+        source.compact();
+
+    }
+
     public static void main(String[] args) throws IOException {
         // 1. 创建Selector,用来管理多个channel
         Selector selector = Selector.open();
@@ -42,7 +61,7 @@ public class ServerSelector {
         SelectionKey sscKey = ssc.register(selector, 0, null);
         // 只关注accept事件
         sscKey.interestOps(SelectionKey.OP_ACCEPT);
-        log.debug("register Key:{}",sscKey);
+        log.debug("register Key:{}", sscKey);
 
         ssc.bind(new InetSocketAddress(8080));
         while (true) {
@@ -51,29 +70,37 @@ public class ServerSelector {
             selector.select();
             // 4. 处理事件 拿到事件集合
             Iterator<SelectionKey> iterator = selector.selectedKeys().iterator(); // accept,read
-            while(iterator.hasNext()){
+            while (iterator.hasNext()) {
                 SelectionKey key = iterator.next();
                 iterator.remove();
-                log.debug("key:{}",key);
+                log.debug("key:{}", key);
                 // 5.区分事件类型
                 if (key.isAcceptable()) {// 处理accept事件
                     ServerSocketChannel channel = (ServerSocketChannel) key.channel();
                     SocketChannel sc = channel.accept();
                     sc.configureBlocking(false);
-                    SelectionKey scKey = sc.register(selector, 0, null);
+                    ByteBuffer buffer = ByteBuffer.allocate(16);
+                    SelectionKey scKey = sc.register(selector, 0, buffer); // 将ByteBuffer作为一个附件关联到selectionKey中
                     scKey.interestOps(SelectionKey.OP_READ);
-                    log.debug("连接建立，ServerSocket是:{}",sc);
-                }else if(key.isReadable()){// 处理read事件
+                    log.debug("连接建立，ServerSocket是:{}", sc);
+                } else if (key.isReadable()) {// 处理read事件
                     try {
                         SocketChannel channel = (SocketChannel) key.channel();
-                        ByteBuffer buffer = ByteBuffer.allocate(16);
+                        ByteBuffer buffer = (ByteBuffer)key.attachment(); // 拿到附件
                         // 如果是正常断开，read的返回值是-1
                         int read = channel.read(buffer);
-                        if(read == -1){
+                        if (read == -1) {
                             key.cancel();
-                        }else{
-                            buffer.flip();
-                            debugRead(buffer);
+                        } else {
+                            split(buffer);
+                            if(buffer.position() == buffer.limit()){
+                                ByteBuffer newByteBuffer = ByteBuffer.allocate(buffer.capacity() * 2);
+                                // 变成读模式，因为要给newByteBuffer去读。
+                                buffer.flip();
+                                newByteBuffer.put(buffer);
+                                key.attach(newByteBuffer);
+                            }
+                            debugAll(buffer);
                         }
                     } catch (IOException e) {
                         e.printStackTrace();

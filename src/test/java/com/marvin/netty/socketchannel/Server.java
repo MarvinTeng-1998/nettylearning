@@ -33,7 +33,7 @@ public class Server {
         List<SocketChannel> channels = new ArrayList<>();
         while (true) {
             // 4.建立客户端连接,其中SocketChannel用来跟客户端之间通信
-            SocketChannel sc = ssc.accept();// 线程在这里停止，accept默认是阻塞的，阻塞方法
+            SocketChannel sc = ssc.accept();
             if (sc != null) {
                 log.debug("connected...{}", sc);
                 sc.configureBlocking(false);// 将socketChannel设置为非阻塞的
