@@ -436,3 +436,116 @@ int count = selector.selectNow();
 
 - 单线程配一个选择器，专门处理accept时间
 - 创建cpu核心数的线程，每个线程配一个选择器，轮流处理read事件
+
+💡 如何拿到 cpu 个数
+* Runtime.getRuntime().availableProcessors() 如果工作在 docker 容器下，因为容器不是物理隔离的，会拿到物理 cpu 个数，而不是容器申请时的个数
+* 这个问题直到 jdk 10 才修复，使用 jvm 参数 UseContainerSupport 配置， 默认开启
+
+# 5 NIO vs BIO
+## 5.1 Stream vs Channel
+* stream 不会自动缓冲数据，channel 会利用系统提供的发送缓冲区、接收缓冲区（更为底层）
+* stream 仅支持阻塞 API，channel 同时支持阻塞、非阻塞 API，网络 channel 可配合 selector 实现多路复用
+* 二者均为全双工，即读写可以同时进行
+
+## 5.2 IO模型
+同步阻塞、同步非阻塞、同步多路复用、异步阻塞（没有此情况）、异步非阻塞
+
+* 同步：线程自己去获取结果（一个线程）
+* 异步：线程自己不去获取结果，而是由其它线程送结果（至少两个线程）
+
+当调用一次channel.read或者stream.read后，会切换至操作系统内核态来进行数据读取，读取分为两个阶段：
+
+- 等待数据阶段
+- 复制数据阶段
+![15.png](img%2F15.png)
+- 阻塞IO
+- 非阻塞IO
+- 多路复用
+- 信号驱动
+- 异步IO
+
+## 5.3 零拷贝
+传统的 IO 将一个文件通过 socket 写出
+
+```java
+File f = new File("helloword/data.txt");
+RandomAccessFile file = new RandomAccessFile(file, "r");
+
+byte[] buf = new byte[(int)f.length()];
+file.read(buf);
+
+Socket socket = ...;
+socket.getOutputStream().write(buf);
+```
+
+内部工作流程是这样的：
+![img.png](img.png)
+
+1. Java 本身并不具备 IO 读写能力，因此 read 方法调用后，要从 java 程序的**用户态**切换至**内核态**，去调用操作系统（Kernel）的读能力，将数据读入**内核缓冲区**。这期间用户线程阻塞，操作系统使用 DMA（Direct Memory Access）来实现文件读，其间也不会使用 cpu。
+
+   > DMA 也可以理解为硬件单元，用来解放 cpu 完成文件 IO
+
+2. 从**内核态**切换回**用户态**，将数据从**内核缓冲区**读入**用户缓冲区**（即 byte[] buf），这期间 cpu 会参与拷贝，无法利用 DMA
+
+3. 调用 write 方法，这时将数据从**用户缓冲区**（byte[] buf）写入 **socket 缓冲区**，cpu 会参与拷贝
+
+4. 接下来要向网卡写数据，这项能力 java 又不具备，因此又得从**用户态**切换至**内核态**，调用操作系统的写能力，使用 DMA 将 **socket 缓冲区**的数据写入网卡，不会使用 cpu
+
+可以看到中间环节较多，java 的 IO 实际不是物理设备级别的读写，而是缓存的复制，底层的真正读写是操作系统来完成的
+
+- 用户态与内核态的切换发生了 3 次，这个操作比较重量级
+- 数据拷贝了共 4 次
+
+**NIO优化**
+通过 DirectByteBuffer
+
+* ByteBuffer.allocate(10)  HeapByteBuffer 使用的还是 java 内存
+* ByteBuffer.allocateDirect(10)  DirectByteBuffer 使用的是操作系统内存
+
+![17.png](img%2F17.png)
+
+大部分步骤与优化前相同，不再赘述。唯有一点：java 可以使用 DirectByteBuf 将堆外内存映射到 jvm 内存中来直接访问使用
+
+* 这块内存不受 jvm 垃圾回收的影响，因此内存地址固定，有助于 IO 读写
+* java 中的 DirectByteBufffer 对象仅维护了此内存的虚引用，内存回收分成两步
+  * DirectByteBuffer 对象被垃圾回收，将虚引用加入引用队列
+  * 通过专门线程访问引用队列，根据虚引用释放堆外内存
+* **减少了一次数据拷贝，用户态与内核态的切换次数没有减少**
+
+**进一步优化（linux 2.4）**java中对应着两个cahnnel调用**transferTo/transferFrom**方法拷贝数据
+
+![18.png](img%2F18.png)
+
+1. java 调用 transferTo 方法后，要从 java 程序的**用户态**切换至**内核态**，使用 DMA将数据读入**内核缓冲区**，不会使用 cpu
+2. 数据从**内核缓冲区**传输到 **socket 缓冲区**，cpu 会参与拷贝
+3. 最后使用 DMA 将 **socket 缓冲区**的数据写入网卡，不会使用 cpu
+4. 可以看到
+
+**只发生了一次用户态与内核态的切换 数据拷贝了3次！**
+
+**再进一步优化**
+![19.png](img%2F19.png)
+1. java 调用 transferTo 方法后，要从 java 程序的**用户态**切换至**内核态**，使用 DMA将数据读入**内核缓冲区**，不会使用 cpu
+2. 只会将一些 offset 和 length 信息拷入 **socket 缓冲区**，几乎无消耗
+3. 使用 DMA 将 **内核缓冲区**的数据写入网卡，不会使用 cpu
+
+**整个过程仅只发生了一次用户态与内核态的切换，数据拷贝了 2 次。**
+所谓的【零拷贝】，并不是真正无拷贝，而是在不会拷贝重复数据到 jvm 内存中，零拷贝的优点有：
+
+* 更少的用户态与内核态的切换
+* 不利用 cpu 计算，减少 cpu 缓存伪共享
+* 零拷贝适合小文件传输
+
+## 5.4 AIO
+AIO 用来解决数据复制阶段的阻塞问题
+
+* 同步意味着，在进行读写操作时，线程需要等待结果，还是相当于闲置
+* 异步意味着，在进行读写操作时，线程不必等待结果，而是将来由操作系统来通过回调方式由另外的线程来获得结果
+
+>  异步模型需要底层操作系统（Kernel）提供支持
+>
+>  * Windows 系统通过 IOCP 实现了真正的异步 IO
+>  * Linux 系统异步 IO 在 2.6 版本引入，但其底层实现还是用多路复用模拟了异步 IO，性能没有优势
+
+**AIO所启动的线程是一个守护线程在跟操作系统交互，等待操作系统复制数据结束，从而以回调的方式返回。而正因为这是一个守护线程，因此要防止主线程结束导致AIO的线程提前结束。**
+

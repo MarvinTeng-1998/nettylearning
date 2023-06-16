@@ -16,7 +16,7 @@ public class Client {
         SocketChannel sc = SocketChannel.open();
         sc.connect(new InetSocketAddress("localhost", 8080));
         SocketAddress address = sc.getLocalAddress();
-        sc.write(Charset.defaultCharset().encode("0123456789hello,world\nasfasfsdgsdgwegsdfsdfhgewrgsdfsdhdrhsdgsf"));
+        sc.write(Charset.defaultCharset().encode("0123456789he"));
         System.in.read();
     }
 }
