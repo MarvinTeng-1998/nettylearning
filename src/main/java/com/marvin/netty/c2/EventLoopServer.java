@@ -23,16 +23,17 @@ public class EventLoopServer {
     public static void main(String[] args) {
         // 细分2: 创建一个独立的EventLoopGroup
         EventLoopGroup group = new DefaultEventLoopGroup();
-
+        NioEventLoopGroup boss = new NioEventLoopGroup();
+        NioEventLoopGroup worker = new NioEventLoopGroup(2);
         new ServerBootstrap()
                 // 建议划分EventLoop之间的职责 Boss和Worker
                 // 第一个参数只负责Accept事件，第二个EventLoop组只负责socketChannel上的读写操作
-                .group(new NioEventLoopGroup(),new NioEventLoopGroup(2))
+                .group(boss, worker)
                 .channel(NioServerSocketChannel.class)
                 .childHandler(new ChannelInitializer<NioSocketChannel>() {
                     @Override
                     protected void initChannel(NioSocketChannel ch) throws Exception {
-                        ch.pipeline().addLast("handler1",new ChannelInboundHandlerAdapter(){
+                        ch.pipeline().addLast("handler1", new ChannelInboundHandlerAdapter() {
                             @Override
                             public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
                                 ByteBuf buffer = (ByteBuf) msg;
@@ -40,7 +41,7 @@ public class EventLoopServer {
                                 // 将消息传递给下一个Handler
                                 ctx.fireChannelRead(msg);
                             }
-                        }).addLast(group,"handler2",new ChannelInboundHandlerAdapter(){
+                        }).addLast(group, "handler2", new ChannelInboundHandlerAdapter() {
                             @Override
                             public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
                                 ByteBuf buffer = (ByteBuf) msg;

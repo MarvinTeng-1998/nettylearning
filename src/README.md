@@ -86,3 +86,156 @@ static void invokeChannelRead(final AbstractChannelHandlerContext next, Object m
 * 如果两个 handler 绑定的是同一个线程，那么就直接调用
 * **否则，把要调用的代码封装为一个任务对象，由下一个 handler 的线程来调用**
 
+## 3.2 Channel
+
+channel的主要作用：
+
+- close()可以用来关闭channel
+- closeFuture()用来处理channel的关闭
+  - sync方法是同步等待channel的关闭
+  - addListener方法是异步等待channel关闭
+- pipeline()是添加处理器
+- write()方法是用来把数据写入
+- writeAndFlush()将数据写入并刷出
+
+## 3.3 ChannelFuture
+
+这时刚才的客户端代码
+
+```java
+new Bootstrap()
+    .group(new NioEventLoopGroup())
+    .channel(NioSocketChannel.class)
+    .handler(new ChannelInitializer<Channel>() {
+        @Override
+        protected void initChannel(Channel ch) {
+            ch.pipeline().addLast(new StringEncoder());
+        }
+    })
+    .connect("127.0.0.1", 8080)
+    .sync()
+    .channel()
+    .writeAndFlush(new Date() + ": hello world!");
+```
+
+现在把它拆开来看
+
+```java
+ChannelFuture channelFuture = new Bootstrap()
+    .group(new NioEventLoopGroup())
+    .channel(NioSocketChannel.class)
+    .handler(new ChannelInitializer<Channel>() {
+        @Override
+        protected void initChannel(Channel ch) {
+            ch.pipeline().addLast(new StringEncoder());
+        }
+    })
+    .connect("127.0.0.1", 8080); // 1
+
+channelFuture.sync().channel().writeAndFlush(new Date() + ": hello world!");
+```
+
+* 1 处返回的是 ChannelFuture 对象，它的作用是利用 channel() 方法来获取 Channel 对象
+
+**注意** connect 方法是异步的，意味着不等连接建立，方法执行就返回了。因此 channelFuture 对象中不能【立刻】获得到正确的 Channel 对象
+
+实验如下：
+
+```java
+ChannelFuture channelFuture = new Bootstrap()
+    .group(new NioEventLoopGroup())
+    .channel(NioSocketChannel.class)
+    .handler(new ChannelInitializer<Channel>() {
+        @Override
+        protected void initChannel(Channel ch) {
+            ch.pipeline().addLast(new StringEncoder());
+        }
+    })
+    .connect("127.0.0.1", 8080);
+
+System.out.println(channelFuture.channel()); // 1
+channelFuture.sync(); // 2
+System.out.println(channelFuture.channel()); // 3
+```
+
+* 执行到 1 时，连接未建立，打印 `[id: 0x2e1884dd]`
+* 执行到 2 时，sync 方法是同步等待连接建立完成
+* 执行到 3 时，连接肯定建立了，打印 `[id: 0x2e1884dd, L:/127.0.0.1:57191 - R:/127.0.0.1:8080]`
+
+除了用 sync 方法可以让异步操作同步以外，还可以使用回调的方式：
+
+```java
+ChannelFuture channelFuture = new Bootstrap()
+    .group(new NioEventLoopGroup())
+    .channel(NioSocketChannel.class)
+    .handler(new ChannelInitializer<Channel>() {
+        @Override
+        protected void initChannel(Channel ch) {
+            ch.pipeline().addLast(new StringEncoder());
+        }
+    })
+    .connect("127.0.0.1", 8080);
+System.out.println(channelFuture.channel()); // 1
+channelFuture.addListener((ChannelFutureListener) future -> {
+    System.out.println(future.channel()); // 2
+});
+```
+
+* 执行到 1 时，连接未建立，打印 `[id: 0x749124ba]`
+* ChannelFutureListener 会在连接建立时被调用（其中 operationComplete 方法），因此执行到 2 时，连接肯定建立了，打印 `[id: 0x749124ba, L:/127.0.0.1:57351 - R:/127.0.0.1:8080]`
+
+#### CloseFuture
+
+```java
+@Slf4j
+public class CloseFutureClient {
+    public static void main(String[] args) throws InterruptedException {
+        NioEventLoopGroup group new NioEventLoopGroup();
+        ChannelFuture channelFuture = new Bootstrap()
+                .group(group)
+                .channel(NioSocketChannel.class)
+                .handler(new ChannelInitializer<NioSocketChannel>() {
+                    @Override // 在连接建立后被调用
+                    protected void initChannel(NioSocketChannel ch) throws Exception {
+                        ch.pipeline().addLast(new LoggingHandler(LogLevel.DEBUG));
+                        ch.pipeline().addLast(new StringEncoder());
+                    }
+                })
+                .connect(new InetSocketAddress("localhost", 8080));
+        Channel channel = channelFuture.sync().channel();
+        log.debug("{}", channel);
+        new Thread(()->{
+            Scanner scanner = new Scanner(System.in);
+            while (true) {
+                String line = scanner.nextLine();
+                if ("q".equals(line)) {
+                    channel.close(); // close 异步操作 1s 之后
+//                    log.debug("处理关闭之后的操作"); // 不能在这里善后
+                    break;
+                }
+                channel.writeAndFlush(line);
+            }
+        }, "input").start();
+
+        // 获取 CloseFuture 对象， 1) 同步处理关闭， 2) 异步处理关闭
+        ChannelFuture closeFuture = channel.closeFuture();
+        /*log.debug("waiting close...");
+        closeFuture.sync();
+        log.debug("处理关闭之后的操作");*/
+        closeFuture.addListener(new ChannelFutureListener() {
+            @Override
+            public void operationComplete(ChannelFuture future) throws Exception {
+                log.debug("处理关闭之后的操作");
+                group.shutdownGracefully();
+            }
+        });
+    }
+}
+```
+
+**Netty用异步的要点：**
+
+* 单线程没法异步提高效率，必须配合多线程、多核 cpu 才能发挥异步的优势！
+* 异步并没有缩短响应时间，反而有所增加；**但是这样做能提高吞吐量，单位时间内处理请求的个数！**
+* **合理进行任务拆分，也是利用异步的关键！**
+
