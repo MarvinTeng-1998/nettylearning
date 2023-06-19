@@ -27,3 +27,62 @@ netty是一个**异步的(多线程异步)**、**基于事件驱动**的网络�
   * 工人可以管理多个 channel 的 io 操作，并且一旦工人负责了某个 channel，就要负责到底（绑定） 
   * 工人既可以执行 io 操作，也可以进行任务处理，每位工人有任务队列，队列里可以堆放多个 channel 的待处理任务，任务分为普通任务、定时任务 
   * 工人按照 pipeline 顺序，依次按照 handler 的规划（代码）处理数据，可以为每道工序指定不同的工人
+
+## 3. 组件
+
+## 3.1 EventLoop
+
+**EventLoop**本质是一个单线程执行器(同时维护了一个Selector)，里面有run方法处理Channel上源源不断的io事件。
+
+它的继承方法比较复杂
+
+- 一条线是继承了自j.u.c.ScheduledExecutorService因此包含线程池中的所有方法
+- 另一条线是继承了parent方法来看看自己属于哪一个EventLoopGroup
+
+**EventLoopGroup**是一组EventGroup，Channel一般会调用EventLoopGroup的register方法来绑定其中EventLoop。后续这个Channel上的io事件都由这个EventLoop来处理(保证了IO时的线程安全)
+
+- 继承自netty自己的EventExecutorGroup
+  - 实现了Iterable接口提供便利EventLoop能力
+  - 另外有next方法获取集合下一个EventLoop
+
+#### 💡 优雅关闭
+
+优雅关闭 `shutdownGracefully` 方法。该方法会首先切换 `EventLoopGroup` 到关闭状态从而拒绝新的任务的加入，然后在任务队列的任务都处理完成后，停止线程的运行。从而确保整体应用是在正常有序的状态下退出的。
+
+![20.png](/img/20.png)
+
+可以看到这时两个EventLoop(工人)在轮流处理channel，但是channel和工人之间进行了绑定。
+
+![21.png](/img/21.png)
+当我们有耗时比较长的任务需执行时，我们可以新定义一个DefaultEventLoopGroup，它用来处理这种时间长的任务。
+
+#### 💡 handler 执行中如何换人？
+
+关键代码 `io.netty.channel.AbstractChannelHandlerContext#invokeChannelRead()`
+
+```java
+static void invokeChannelRead(final AbstractChannelHandlerContext next, Object msg) {
+    final Object m = next.pipeline.touch(ObjectUtil.checkNotNull(msg, "msg"), next);
+    // 下一个 handler 的事件循环是否与当前的事件循环是同一个线程
+    // next表示的是下一个handler，next.executor返回的是这个handler所对应的EventLoop
+    EventExecutor executor = next.executor();
+    
+    // 是，直接调用
+    if (executor.inEventLoop()) {
+        next.invokeChannelRead(m);
+    } 
+    // 不是，将要执行的代码作为任务提交给下一个事件循环处理（换人）
+    else {
+        executor.execute(new Runnable() {
+            @Override
+            public void run() {
+                next.invokeChannelRead(m);
+            }
+        });
+    }
+}
+```
+
+* 如果两个 handler 绑定的是同一个线程，那么就直接调用
+* **否则，把要调用的代码封装为一个任务对象，由下一个 handler 的线程来调用**
+
