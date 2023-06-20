@@ -5,17 +5,23 @@
 netty是一个**异步的(多线程异步)**、**基于事件驱动**的网络应用框架，用于快速开发可维护、高性能的网络服务器和客户端。
 
 ## 1.2 Netty的优势
+
 ### Netty vs NIO
+
 - 需要自己构建协议
 - 解决TCP传输问题，如粘包、半包
 - epoll空轮询导致CPU 100%
 - 对API进行增强，使之更加易用，如FastThreadLocal -> ThreadLocal,ByteBuf -> ByteBuffer
 
 # 2. Hello World
+
 ## 2.1 目标
+
 开发一个简单的服务器端和客户端
+
 - 客户端向服务器端发送hello，world
 - 服务端仅接受，不返回
+
 ### 💡 提示
 
 * 把 channel 理解为数据的通道
@@ -24,8 +30,8 @@ netty是一个**异步的(多线程异步)**、**基于事件驱动**的网络�
   * 工序有多道，合在一起就是 pipeline，pipeline 负责发布事件（读、读取完成...）传播给每个 handler， handler 对自己感兴趣的事件进行处理（重写了相应事件处理方法）
   * handler 分 Inbound 和 Outbound 两类
 * 把 eventLoop 理解为处理数据的工人
-  * 工人可以管理多个 channel 的 io 操作，并且一旦工人负责了某个 channel，就要负责到底（绑定） 
-  * 工人既可以执行 io 操作，也可以进行任务处理，每位工人有任务队列，队列里可以堆放多个 channel 的待处理任务，任务分为普通任务、定时任务 
+  * 工人可以管理多个 channel 的 io 操作，并且一旦工人负责了某个 channel，就要负责到底（绑定）
+  * 工人既可以执行 io 操作，也可以进行任务处理，每位工人有任务队列，队列里可以堆放多个 channel 的待处理任务，任务分为普通任务、定时任务
   * 工人按照 pipeline 顺序，依次按照 handler 的规划（代码）处理数据，可以为每道工序指定不同的工人
 
 ## 3. 组件
@@ -66,7 +72,7 @@ static void invokeChannelRead(final AbstractChannelHandlerContext next, Object m
     // 下一个 handler 的事件循环是否与当前的事件循环是同一个线程
     // next表示的是下一个handler，next.executor返回的是这个handler所对应的EventLoop
     EventExecutor executor = next.executor();
-    
+  
     // 是，直接调用
     if (executor.inEventLoop()) {
         next.invokeChannelRead(m);
@@ -247,17 +253,29 @@ public class CloseFutureClient {
 - netty 中的Future可以同步也可以异步，但都要等待任务结束
 - netty 中的Promise不仅有Future的功能，而且脱离任务独立存在，只作为两个线程间传递结果的容器。
 
-| 功能/名称    | jdk Future                     | netty Future                                                 | Promise      |
-| ------------ | ------------------------------ | ------------------------------------------------------------ | ------------ |
-| cancel       | 取消任务                       | -                                                            | -            |
-| isCanceled   | 任务是否取消                   | -                                                            | -            |
-| isDone       | 任务是否完成，不能区分成功失败 | -                                                            | -            |
-| get          | 获取任务结果，阻塞等待         | -                                                            | -            |
-| getNow       | -                              | 获取任务结果，非阻塞，还未产生结果时返回 null                | -            |
+
+| 功能/名称    | jdk Future                     | netty Future                                                    | Promise      |
+| ------------ | ------------------------------ | --------------------------------------------------------------- | ------------ |
+| cancel       | 取消任务                       | -                                                               | -            |
+| isCanceled   | 任务是否取消                   | -                                                               | -            |
+| isDone       | 任务是否完成，不能区分成功失败 | -                                                               | -            |
+| get          | 获取任务结果，阻塞等待         | -                                                               | -            |
+| getNow       | -                              | 获取任务结果，非阻塞，还未产生结果时返回 null                   | -            |
 | await        | -                              | 等待任务结束，如果任务失败，不会抛异常，而是通过 isSuccess 判断 | -            |
-| sync         | -                              | 等待任务结束，如果任务失败，抛出异常                         | -            |
-| isSuccess    | -                              | 判断任务是否成功                                             | -            |
-| cause        | -                              | 获取失败信息，非阻塞，如果没有失败，返回null                 | -            |
-| addLinstener | -                              | 添加回调，异步接收结果                                       | -            |
-| setSuccess   | -                              | -                                                            | 设置成功结果 |
-| setFailure   | -                              | -                                                            | 设置失败结果 |
+| sync         | -                              | 等待任务结束，如果任务失败，抛出异常                            | -            |
+| isSuccess    | -                              | 判断任务是否成功                                                | -            |
+| cause        | -                              | 获取失败信息，非阻塞，如果没有失败，返回null                    | -            |
+| addLinstener | -                              | 添加回调，异步接收结果                                          | -            |
+| setSuccess   | -                              | -                                                               | 设置成功结果 |
+| setFailure   | -                              | -                                                               | 设置失败结果 |
+
+## 3.5 HANDLER & PIPELINE
+
+**ChannelHandler用来处理Channel上的各种事件，分为入站、出站两种。所有ChannelHandler被练成一串就是Pipeline**
+
+* **入站处理器通常是ChannelInboundHandlerAdapter的子类，主要用来读取客户端数据，写回结果**
+* **出站处理器通常是ChannelOutboundHandlerAdapter的子类，主要用来写回结果进行加工。**
+
+**ChannelInboundHandlerAdapter 是按照 addLast 的顺序执行的，而 ChannelOutboundHandlerAdapter 是按照 addLast 的逆序执行的。ChannelPipeline 的实现是一个 ChannelHandlerContext（包装了 ChannelHandler） 组成的双向链表**
+
+**也就是说，当我们入站我们会从head->到h1 -> 到h2 -> 到h3 -> h4这种过程。当我们出站我们会从tail -> h6 -> h5这种过程**
