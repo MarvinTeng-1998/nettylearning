@@ -279,3 +279,102 @@ public class CloseFutureClient {
 **ChannelInboundHandlerAdapter 是按照 addLast 的顺序执行的，而 ChannelOutboundHandlerAdapter 是按照 addLast 的逆序执行的。ChannelPipeline 的实现是一个 ChannelHandlerContext（包装了 ChannelHandler） 组成的双向链表**
 
 **也就是说，当我们入站我们会从head->到h1 -> 到h2 -> 到h3 -> h4这种过程。当我们出站我们会从tail -> h6 -> h5这种过程**
+## 3.6 ByteBuf
+
+是对字节数据的封装。
+
+**直接内存vs堆内存**
+
+```java
+ByteBuf buffer = ByteBufAllocator.DEFAULT.heapBuffer(10);
+ByteBuf buffer = ByteBufAllocator.DEFAULT.directBuffer(10);
+```
+
+- 直接内存创建和销毁的代价昂贵，但是读写性能比较高(少一次内存复制)，适合配合池化功能使用
+- 直接内存对GC的压力小，因为这部分不受JVM垃圾回收的管理，但是也要主动释放。
+
+**池化VS非池化**
+
+池化的最大意义在于可以重用ByteBuf，优点有：
+
+- 没有池化，则每次都得创建心的ByteBuf实例，这个操作对直接内存代价昂贵，就算是堆内存，也会增加GC压力。
+- 有了池化，则可以重用ByteBuf实例，并且采用了jemalloc类似的内存分配算法提升效率。
+- 高并发时，池化功能更加节省资源，减少内存溢出的可能。
+
+**组成**
+
+ByteBuf由4个部分组成：
+
+![22.png](/img/22.png)
+
+最开始读写指针都在头部。
+
+**写入**
+
+网络编程，默认使用的是大端写入。也就是说0x250 -> 00 00 02 50。小端写入：0x250 -> 50 02 00 00
+
+**扩容**
+
+- 如果写入后数据大小未超过512，则选择下一个16的整数倍，例如写入后大小为12，则扩容的capacity为16
+- 如果写入后数据大小超过了512，则选择下一个2^n，例如写入后大小为513，则扩容后capacity是2^10=1024
+- 扩容不能超过max capacity，会报错。
+
+**读取**
+
+读过的内容属于废弃部分，再读只能读取尚未读取的部分。
+
+**内存回收，内存释放**
+
+由于 Netty 中有堆外内存的 ByteBuf 实现，堆外内存最好是手动来释放，而不是等 GC 垃圾回收。
+
+* **UnpooledHeapByteBuf 使用的是 JVM 内存，只需等 GC 回收内存即可**
+* UnpooledDirectByteBuf 使用的就是直接内存了，需要特殊的方法来回收内存
+* PooledByteBuf 和它的子类使用了池化机制，需要更复杂的规则来回收内存
+
+> 回收内存的源码实现，protected abstract void deallocate()
+
+Netty 这里采用了引用计数法来控制回收内存，每个 ByteBuf 都实现了 ReferenceCounted 接口
+
+* 每个 ByteBuf 对象的初始计数为 1
+* 调用 release 方法计数减 1，如果计数为 0，ByteBuf 内存被回收
+* 调用 retain 方法计数加 1，表示调用者没用完之前，其它 handler 即使调用了 release 也不会造成回收
+* 当计数为 0 时，底层内存会被回收，这时即使 ByteBuf 对象还在，其各个方法均无法正常使用
+
+因为 pipeline 的存在，一般需要将 ByteBuf 传递给下一个 ChannelHandler，如果在 finally 中 release 了，就失去了传递性（当然，如果在这个 ChannelHandler 内这个 ByteBuf 已完成了它的使命，那么便无须再传递）
+
+基本规则是，**谁是ByteBuf的最后使用者，谁负责 release**，详细分析如下
+
+* 起点，对于 NIO 实现来讲，在 io.netty.channel.nio.AbstractNioByteChannel.NioByteUnsafe#read 方法中首次创建 ByteBuf 放入 pipeline（line 163 pipeline.fireChannelRead(byteBuf)）
+* 入站 ByteBuf 处理原则
+  * 对原始 ByteBuf 不做处理，调用 ctx.fireChannelRead(msg) 向后传递，这时无须 release
+  * 将原始 ByteBuf 转换为其它类型的 Java 对象，这时 ByteBuf 就没用了，必须 release
+  * 如果不调用 ctx.fireChannelRead(msg) 向后传递，那么也必须 release
+  * 注意各种异常，如果 ByteBuf 没有成功传递到下一个 ChannelHandler，必须 release
+  * 假设消息一直向后传，那么 TailContext 会负责释放未处理消息（原始的 ByteBuf）
+* 出站 ByteBuf 处理原则
+  * 出站消息最终都会转为 ByteBuf 输出，一直向前传，由 HeadContext flush 后 release
+* 异常处理原则
+  * 有时候不清楚 ByteBuf 被引用了多少次，但又必须彻底释放，可以循环调用 release 直到返回 true
+
+**slice**
+
+【零拷贝的体现之一】，对原始的ByteBuf进行切片成多个ByteBuf，切片后的ByteBuf并没有发生内存复制，还是使用原始ByteBuf内存，切片后的ByteBuf维护独立的write、read指针。
+
+**duplicate**
+
+【零拷贝的实现之一】，就好比截取了原始ByteBuf所有内容，并且没有max capacity的限制，也就是与原始ByteBuf使用同一块底层内存，只是读写指针是独立的。
+
+**copy**
+
+会将底层数据结构进行深拷贝，因此无论读写都跟原始内存无关。
+
+**composite**
+
+【零拷贝】的体现之一，可以将多个 ByteBuf 合并为一个逻辑上的 ByteBuf，避免拷贝
+
+**compositeByteBuf.addComponents(true,buf1,buf2);第一个参数是increaseWriteIndex，如果不是true，则不会增长写指针。**
+
+CompositeByteBuf 是一个组合的 ByteBuf，它内部维护了一个 Component 数组，每个 Component 管理一个 ByteBuf，记录了这个 ByteBuf 相对于整体偏移量等信息，代表着整体中某一段的数据。
+
+* 优点，对外是一个虚拟视图，组合这些 ByteBuf 不会产生内存复制
+* 缺点，复杂了很多，多次操作会带来性能的损耗
