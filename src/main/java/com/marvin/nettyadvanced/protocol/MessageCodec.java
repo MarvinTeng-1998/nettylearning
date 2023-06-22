@@ -1,5 +1,6 @@
 package com.marvin.nettyadvanced.protocol;
 
+import com.marvin.config.Config;
 import com.marvin.message.Message;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
@@ -33,7 +34,8 @@ public class MessageCodec extends ByteToMessageCodec<Message>{
         // 2. 1字节的版本
         out.writeByte(1);
         // 3. 1字节的序列化方式 0-jdk序列化， 1-json序列化
-        out.writeByte(1);
+        out.writeByte(Config.getSerializerAlgorithm().ordinal());
+        // System.out.println(Config.getSerializerAlgorithm().ordinal());
         // 4. 1字节的指令类型
         out.writeByte(msg.getMessageType());
         // 5. 4个字节：ID
@@ -42,10 +44,7 @@ public class MessageCodec extends ByteToMessageCodec<Message>{
         out.writeByte(0xff);
 
         // 7. 获取内容的字节数组-> 序列化
-        ByteArrayOutputStream bos = new ByteArrayOutputStream();
-        ObjectOutputStream oos = new ObjectOutputStream(bos);
-        oos.writeObject(msg);
-        byte[] bytes = bos.toByteArray();
+        byte[] bytes = Serializer.Algorithm.values()[Config.getSerializerAlgorithm().ordinal()].serialize(msg);
         // 8. 字节长度
         out.writeInt(bytes.length);
         // 9. 写入内容
@@ -66,18 +65,21 @@ public class MessageCodec extends ByteToMessageCodec<Message>{
 
         int magicNum = in.readInt();
         byte version = in.readByte();
-        byte serializerType = in.readByte();
+        byte serializerType = in.readByte(); // 0 1
+
         byte messageType = in.readByte();
         int sequenceId = in.readInt();
         in.readByte();
         int length = in.readInt();
         byte[] bytes = new byte[length];
-        in.readBytes(bytes, 0, length);
+        in.readBytes(bytes,0,length);
 
-        ObjectInputStream ois = new ObjectInputStream(new ByteArrayInputStream(bytes));
-        Message message = (Message) ois.readObject();
-        log.debug("{}, {}, {}, {}, {}, {}", magicNum, version, serializerType, messageType, sequenceId, length);
-        log.debug("{}", message);
+        Serializer.Algorithm algorithm = Serializer.Algorithm.values()[serializerType];
+        System.out.println(algorithm);
+        Class<?> messageClass = Message.getMessageClass(messageType);
+        Object message = algorithm.deserialize(messageClass,bytes);
+        // log.debug("{}, {}, {}, {}, {}, {}", magicNum, version, serializerType, messageType, sequenceId, length);
+        // log.debug("{}", message);
         out.add(message);
 
     }
