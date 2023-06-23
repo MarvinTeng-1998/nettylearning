@@ -18,6 +18,7 @@ public abstract class Message implements Serializable {
         return messageClasses.get(messageType);
     }
 
+
     private int sequenceId;
 
     private int messageType;
